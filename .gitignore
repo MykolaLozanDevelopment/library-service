@@ -1,0 +1,16 @@
+# Environment
+.env
+.venv/
+
+# Database
+db.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
