@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
@@ -9,6 +10,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from books.models import Book
+from borrowings.messages import build_borrowing_message
 from borrowings.models import Borrowing
 
 LIST_URL = reverse("borrowings:borrowing-list")
@@ -153,6 +155,9 @@ class CreateBorrowingTests(TestCase):
         self.book = sample_book(inventory=2)
         self.client = APIClient()
         self.client.force_authenticate(self.user)
+        patcher = patch("borrowings.views.send_telegram_message")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_create_borrowing(self):
         response = self.client.post(LIST_URL, create_payload(self.book))
@@ -413,3 +418,53 @@ class ReturnBorrowingTests(TestCase):
         self.assertEqual(
             response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED
         )
+
+
+class BorrowingMessageTests(TestCase):
+    def test_message_contains_borrowing_details(self):
+        borrowing = sample_borrowing(sample_user(), sample_book())
+        message = build_borrowing_message(borrowing)
+
+        self.assertIn(f"#{borrowing.id}", message)
+        self.assertIn("user@example.com", message)
+        self.assertIn("Dune", message)
+        self.assertIn("Frank Herbert", message)
+        self.assertIn("2026-10-01", message)
+        self.assertIn("2026-10-08", message)
+
+
+class BorrowingNotificationTests(TestCase):
+    def setUp(self):
+        self.user = sample_user()
+        self.book = sample_book(inventory=2)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        patcher = patch("borrowings.views.send_telegram_message")
+        self.mock_send = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_notification_sent_on_create(self):
+        response = self.client.post(LIST_URL, create_payload(self.book))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.mock_send.assert_called_once()
+        text = self.mock_send.call_args.args[0]
+        borrowing = Borrowing.objects.get()
+        self.assertIn(f"#{borrowing.id}", text)
+        self.assertIn(self.user.email, text)
+        self.assertIn("Dune", text)
+        self.assertIn(borrowing.expected_return_date.isoformat(), text)
+
+    def test_no_notification_when_creation_fails(self):
+        book = sample_book(title="Emma", inventory=0)
+        response = self.client.post(LIST_URL, create_payload(book))
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.mock_send.assert_not_called()
+
+    def test_borrowing_created_even_if_notification_fails(self):
+        self.mock_send.return_value = False
+        response = self.client.post(LIST_URL, create_payload(self.book))
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Borrowing.objects.count(), 1)
