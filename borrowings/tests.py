@@ -215,3 +215,109 @@ class CreateBorrowingTests(TestCase):
     def test_missing_fields_rejected(self):
         response = self.client.post(LIST_URL, {})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+def returned_ids(response):
+    return {item["id"] for item in response.data}
+
+
+class BorrowingFilteringTests(TestCase):
+    def setUp(self):
+        self.user = sample_user()
+        self.other = sample_user("other@example.com")
+        self.book = sample_book(inventory=10)
+        self.own_active = sample_borrowing(self.user, self.book)
+        self.own_returned = sample_borrowing(
+            self.user,
+            self.book,
+            actual_return_date=date(2026, 10, 3),
+        )
+        self.foreign_active = sample_borrowing(self.other, self.book)
+        self.client = APIClient()
+
+
+class UserBorrowingFilteringTests(BorrowingFilteringTests):
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(self.user)
+
+    def test_user_sees_only_own_borrowings(self):
+        response = self.client.get(LIST_URL)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            returned_ids(response),
+            {self.own_active.id, self.own_returned.id},
+        )
+
+    def test_user_cannot_retrieve_foreign_borrowing(self):
+        response = self.client.get(detail_url(self.foreign_active.id))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_user_id_param_ignored_for_non_admin(self):
+        response = self.client.get(LIST_URL, {"user_id": self.other.id})
+        self.assertEqual(
+            returned_ids(response),
+            {self.own_active.id, self.own_returned.id},
+        )
+
+    def test_is_active_true_returns_only_not_returned(self):
+        response = self.client.get(LIST_URL, {"is_active": "true"})
+        self.assertEqual(returned_ids(response), {self.own_active.id})
+
+    def test_is_active_false_returns_only_returned(self):
+        response = self.client.get(LIST_URL, {"is_active": "false"})
+        self.assertEqual(returned_ids(response), {self.own_returned.id})
+
+    def test_is_active_accepts_numeric_values(self):
+        active = self.client.get(LIST_URL, {"is_active": "1"})
+        returned = self.client.get(LIST_URL, {"is_active": "0"})
+        self.assertEqual(returned_ids(active), {self.own_active.id})
+        self.assertEqual(returned_ids(returned), {self.own_returned.id})
+
+    def test_is_active_invalid_value_rejected(self):
+        response = self.client.get(LIST_URL, {"is_active": "maybe"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class AdminBorrowingFilteringTests(BorrowingFilteringTests):
+    def setUp(self):
+        super().setUp()
+        self.admin = get_user_model().objects.create_superuser(
+            email="admin@example.com", password="pass12345"
+        )
+        self.client.force_authenticate(self.admin)
+
+    def test_admin_sees_all_borrowings(self):
+        response = self.client.get(LIST_URL)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            returned_ids(response),
+            {
+                self.own_active.id,
+                self.own_returned.id,
+                self.foreign_active.id,
+            },
+        )
+
+    def test_admin_filters_by_user_id(self):
+        response = self.client.get(LIST_URL, {"user_id": self.other.id})
+        self.assertEqual(returned_ids(response), {self.foreign_active.id})
+
+    def test_admin_user_id_without_borrowings_returns_empty(self):
+        response = self.client.get(LIST_URL, {"user_id": self.admin.id})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, [])
+
+    def test_admin_invalid_user_id_rejected(self):
+        response = self.client.get(LIST_URL, {"user_id": "abc"})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_admin_combines_user_id_and_is_active(self):
+        response = self.client.get(
+            LIST_URL, {"user_id": self.user.id, "is_active": "true"}
+        )
+        self.assertEqual(returned_ids(response), {self.own_active.id})
+
+    def test_admin_can_retrieve_any_borrowing(self):
+        response = self.client.get(detail_url(self.foreign_active.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
