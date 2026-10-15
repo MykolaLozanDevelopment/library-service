@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -122,8 +123,95 @@ class BorrowingApiTests(TestCase):
         response = self.client.get(detail_url(999))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_create_not_allowed_on_list_endpoint(self):
-        response = self.client.post(LIST_URL, {})
-        self.assertEqual(
-            response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED
+
+def create_payload(book, days=7):
+    return_date = timezone.localdate() + timedelta(days=days)
+    return {
+        "book": book.id,
+        "expected_return_date": return_date.isoformat(),
+    }
+
+
+class UnauthenticatedBorrowingApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_list_requires_authentication(self):
+        response = self.client.get(LIST_URL)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_create_requires_authentication(self):
+        book = sample_book()
+        response = self.client.post(LIST_URL, create_payload(book))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(Borrowing.objects.count(), 0)
+
+
+class CreateBorrowingTests(TestCase):
+    def setUp(self):
+        self.user = sample_user()
+        self.book = sample_book(inventory=2)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_create_borrowing(self):
+        response = self.client.post(LIST_URL, create_payload(self.book))
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        borrowing = Borrowing.objects.get()
+        self.assertEqual(borrowing.book, self.book)
+        self.assertEqual(borrowing.borrow_date, timezone.localdate())
+        self.assertIsNone(borrowing.actual_return_date)
+
+    def test_create_decreases_inventory(self):
+        self.client.post(LIST_URL, create_payload(self.book))
+        self.book.refresh_from_db()
+        self.assertEqual(self.book.inventory, 1)
+
+    def test_create_attaches_current_user(self):
+        other = sample_user("other@example.com")
+        payload = {**create_payload(self.book), "user": other.id}
+        response = self.client.post(LIST_URL, payload)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Borrowing.objects.get().user, self.user)
+
+    def test_create_with_zero_inventory_rejected(self):
+        book = sample_book(title="Emma", inventory=0)
+        response = self.client.post(LIST_URL, create_payload(book))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Borrowing.objects.count(), 0)
+        book.refresh_from_db()
+        self.assertEqual(book.inventory, 0)
+
+    def test_last_copy_cannot_be_borrowed_twice(self):
+        book = sample_book(title="Emma", inventory=1)
+        first = self.client.post(LIST_URL, create_payload(book))
+        second = self.client.post(LIST_URL, create_payload(book))
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        book.refresh_from_db()
+        self.assertEqual(book.inventory, 0)
+        self.assertEqual(Borrowing.objects.count(), 1)
+
+    def test_expected_return_date_today_rejected(self):
+        response = self.client.post(
+            LIST_URL, create_payload(self.book, days=0)
         )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Borrowing.objects.count(), 0)
+
+    def test_expected_return_date_in_past_rejected(self):
+        response = self.client.post(
+            LIST_URL, create_payload(self.book, days=-1)
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.book.refresh_from_db()
+        self.assertEqual(self.book.inventory, 2)
+
+    def test_nonexistent_book_rejected(self):
+        payload = {**create_payload(self.book), "book": 999}
+        response = self.client.post(LIST_URL, payload)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_missing_fields_rejected(self):
+        response = self.client.post(LIST_URL, {})
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
