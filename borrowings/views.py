@@ -7,11 +7,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from books.models import Book
+from borrowings.messages import build_borrowing_message
 from borrowings.models import Borrowing
 from borrowings.serializers import (
     BorrowingCreateSerializer,
     BorrowingSerializer,
 )
+from notifications.telegram import send_telegram_message
 
 TRUE_VALUES = ("true", "1")
 FALSE_VALUES = ("false", "0")
@@ -65,7 +67,8 @@ class BorrowingViewSet(
         return BorrowingSerializer
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        borrowing = serializer.save(user=self.request.user)
+        send_telegram_message(build_borrowing_message(borrowing))
 
     @action(
         detail=True,
