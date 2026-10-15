@@ -1,7 +1,12 @@
+from django.db import transaction
+from django.utils import timezone
 from rest_framework import mixins, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
+from books.models import Book
 from borrowings.models import Borrowing
 from borrowings.serializers import (
     BorrowingCreateSerializer,
@@ -61,3 +66,34 @@ class BorrowingViewSet(
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="return",
+        url_name="return",
+    )
+    def return_borrowing(self, request, pk=None):
+        """Set the actual return date and give the book back to stock."""
+        borrowing = self.get_object()
+
+        with transaction.atomic():
+            borrowing = Borrowing.objects.select_for_update().get(
+                pk=borrowing.pk
+            )
+            if borrowing.actual_return_date is not None:
+                raise ValidationError(
+                    {"detail": "This borrowing has already been returned."}
+                )
+
+            book = Book.objects.select_for_update().get(
+                pk=borrowing.book_id
+            )
+            book.inventory += 1
+            book.save(update_fields=["inventory"])
+
+            borrowing.actual_return_date = timezone.localdate()
+            borrowing.save(update_fields=["actual_return_date"])
+            borrowing.book = book
+
+        return Response(BorrowingSerializer(borrowing).data)
