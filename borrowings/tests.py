@@ -321,3 +321,95 @@ class AdminBorrowingFilteringTests(BorrowingFilteringTests):
     def test_admin_can_retrieve_any_borrowing(self):
         response = self.client.get(detail_url(self.foreign_active.id))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+def return_url(borrowing_id):
+    return reverse("borrowings:borrowing-return", args=[borrowing_id])
+
+
+class ReturnBorrowingTests(TestCase):
+    def setUp(self):
+        self.today = timezone.localdate()
+        self.user = sample_user()
+        self.other = sample_user("other@example.com")
+        self.book = sample_book(inventory=3)
+        self.borrowing = sample_borrowing(
+            self.user,
+            self.book,
+            borrow_date=self.today - timedelta(days=2),
+            expected_return_date=self.today + timedelta(days=5),
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_return_sets_actual_return_date(self):
+        response = self.client.post(return_url(self.borrowing.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.borrowing.refresh_from_db()
+        self.assertEqual(self.borrowing.actual_return_date, self.today)
+
+    def test_return_increases_inventory(self):
+        self.client.post(return_url(self.borrowing.id))
+        self.book.refresh_from_db()
+        self.assertEqual(self.book.inventory, 4)
+
+    def test_return_response_contains_updated_borrowing(self):
+        response = self.client.post(return_url(self.borrowing.id))
+        self.assertEqual(response.data["id"], self.borrowing.id)
+        self.assertEqual(
+            response.data["actual_return_date"], self.today.isoformat()
+        )
+        self.assertEqual(response.data["book"]["inventory"], 4)
+
+    def test_cannot_return_twice(self):
+        first = self.client.post(return_url(self.borrowing.id))
+        second = self.client.post(return_url(self.borrowing.id))
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        self.book.refresh_from_db()
+        self.assertEqual(self.book.inventory, 4)
+
+    def test_returned_borrowing_is_not_active(self):
+        self.client.post(return_url(self.borrowing.id))
+        response = self.client.get(LIST_URL, {"is_active": "true"})
+        self.assertEqual(response.data, [])
+
+    def test_return_requires_authentication(self):
+        client = APIClient()
+        response = client.post(return_url(self.borrowing.id))
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_user_cannot_return_foreign_borrowing(self):
+        foreign = sample_borrowing(
+            self.other,
+            self.book,
+            borrow_date=self.today - timedelta(days=1),
+            expected_return_date=self.today + timedelta(days=6),
+        )
+        response = self.client.post(return_url(foreign.id))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        foreign.refresh_from_db()
+        self.assertIsNone(foreign.actual_return_date)
+        self.book.refresh_from_db()
+        self.assertEqual(self.book.inventory, 3)
+
+    def test_admin_can_return_any_borrowing(self):
+        admin = get_user_model().objects.create_superuser(
+            email="admin@example.com", password="pass12345"
+        )
+        client = APIClient()
+        client.force_authenticate(admin)
+        response = client.post(return_url(self.borrowing.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.borrowing.refresh_from_db()
+        self.assertEqual(self.borrowing.actual_return_date, self.today)
+
+    def test_return_missing_borrowing_returns_404(self):
+        response = self.client.post(return_url(999))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_return_not_allowed_with_get(self):
+        response = self.client.get(return_url(self.borrowing.id))
+        self.assertEqual(
+            response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED
+        )
