@@ -5,6 +5,12 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    extend_schema,
+    extend_schema_view,
+)
 
 from books.models import Book
 from borrowings.messages import build_borrowing_message
@@ -19,6 +25,44 @@ TRUE_VALUES = ("true", "1")
 FALSE_VALUES = ("false", "0")
 
 
+@extend_schema_view(
+    list=extend_schema(
+        summary="List borrowings",
+        description=(
+            "Regular users see only their own borrowings. "
+            "Admins see all borrowings, or only one user's when "
+            "`user_id` is given."
+        ),
+        parameters=[
+            OpenApiParameter(
+                "is_active",
+                OpenApiTypes.BOOL,
+                description=(
+                    "`true` - not returned yet, "
+                    "`false` - already returned."
+                ),
+            ),
+            OpenApiParameter(
+                "user_id",
+                OpenApiTypes.INT,
+                description="Admins only: filter by user id.",
+            ),
+        ],
+    ),
+    retrieve=extend_schema(
+        summary="Get borrowing details",
+        description="Regular users can open only their own borrowings.",
+    ),
+    create=extend_schema(
+        summary="Create a borrowing",
+        description=(
+            "Borrows a book for the current user: decreases the book "
+            "inventory by 1 and sends a Telegram notification. "
+            "Fails if the inventory is 0 or the expected return date "
+            "is not after today."
+        ),
+    ),
+)
 class BorrowingViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
@@ -70,6 +114,15 @@ class BorrowingViewSet(
         borrowing = serializer.save(user=self.request.user)
         send_telegram_message(build_borrowing_message(borrowing))
 
+    @extend_schema(
+        summary="Return a borrowing",
+        description=(
+            "Sets the actual return date to today and increases the "
+            "book inventory by 1. A borrowing cannot be returned twice."
+        ),
+        request=None,
+        responses=BorrowingSerializer,
+    )
     @action(
         detail=True,
         methods=["post"],
