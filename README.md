@@ -149,7 +149,7 @@ coverage report
 Code style:
 
 ```bash
-flake8 --exclude=.venv,migrations
+flake8
 ```
 
 ## Project structure

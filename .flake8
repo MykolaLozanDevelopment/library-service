@@ -1,0 +1,4 @@
+[flake8]
+exclude = .venv,migrations,__pycache__
+per-file-ignores =
+    library_service/settings.py: E501
